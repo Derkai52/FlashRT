@@ -64,6 +64,9 @@ flash-attn = ["flash-attn"]
 thor-fa4 = ["nvidia-cutlass-dsl==4.5.1", "quack-kernels==0.4.1"]
 all = ["flash-rt[torch,jax,server,eval,minimax-remover,motus,chameleon]"]
 
+[project.scripts]
+piinfra = "flash_rt.piinfra.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/flashrt-project/FlashRT"
 Repository = "https://github.com/flashrt-project/FlashRT"

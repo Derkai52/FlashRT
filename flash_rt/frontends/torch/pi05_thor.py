@@ -434,23 +434,30 @@ class Pi05TorchFrontendThor:
         _enc_w_scales = getattr(self, '_enc_w_scales', []) or [0.0] * (Le * 4)
         self._enc_w_dev = torch.tensor(_enc_w_scales, dtype=torch.float32, device='cuda')
 
+        self._enc_rope = torch.empty(Se_max, 256, dtype=fp16, device='cuda')
+
+        # KV cache
+        Sa, Da, Ha, La = int(os.environ.get("FLASHRT_PI05_CHUNK_SIZE", "10")), 1024, 4096, 18
+        self.Sa = Sa; self.Da = Da; self.Ha = Ha; self.La = La
+        self.Sa_gemm = Sa + (Sa & 1)
+
         # RoPE table.  The reference model stores ``inv_freq`` in bfloat16
         # (checkpoint dtype), so the cos/sin phase must be derived from a
         # bf16-quantized ``inv_freq`` to match it.  Computing it in fp32 keeps
         # a ~1e-3 per-frequency offset that is scaled by the absolute position
         # and grows into a large RoPE angle error at high prefix positions,
         # diverging the prefix K/V and the action decision on borderline frames.
+        # Size covers encoder prefix (Se_max) + action chunk (Sa). 5-view
+        # sculptor needs >1200 (legacy LIBERO 2/3-view cap).
+        rope_len = max(1200, int(Se_max) + int(Sa))
         inv_freq = 1.0 / (10000 ** (torch.arange(0, 256, 2, dtype=torch.float32, device='cuda') / 256))
         inv_freq = inv_freq.to(torch.bfloat16).to(torch.float32)
-        kp = inv_freq[None, :] * torch.arange(1200, device='cuda')[:, None].float()
+        kp = inv_freq[None, :] * torch.arange(rope_len, device='cuda')[:, None].float()
         self._kc_t = torch.cos(kp).to(fp16)
         self._ks_t = torch.sin(kp).to(fp16)
-        self._enc_rope = torch.empty(Se_max, 256, dtype=fp16, device='cuda')
 
-        # KV cache
-        Sa, Da, Ha, La = 10, 1024, 4096, 18
-        self.Sa = Sa; self.Da = Da; self.Ha = Ha; self.La = La
         total_keys_max = Se_max + Sa
+        tk_logits = total_keys_max + (total_keys_max & 1)
         self._Kc = torch.zeros(Le, total_keys_max, HDe, dtype=fp16, device='cuda')
         self._Vc = torch.zeros(Le, total_keys_max, HDe, dtype=fp16, device='cuda')
 
@@ -458,7 +465,7 @@ class Pi05TorchFrontendThor:
         self._enc_x      = torch.empty(Se_max, De, dtype=fp16, device='cuda')
         self._enc_x_fp8  = torch.zeros(Se_max * De, dtype=torch.uint8, device='cuda')
         self._enc_qkv_buf = torch.empty(Se_max, 2560, dtype=fp16, device='cuda')
-        self._enc_logits = torch.empty(Se_max * NHe, total_keys_max, dtype=fp16, device='cuda')
+        self._enc_logits = torch.empty(Se_max * NHe, tk_logits, dtype=fp16, device='cuda')
         self._enc_attn   = torch.empty(Se_max, NHe * HDe, dtype=fp16, device='cuda')
         self._enc_o_fp8  = torch.zeros(Se_max * NHe * HDe, dtype=torch.uint8, device='cuda')
         self._enc_gate   = torch.empty(Se_max, 2 * He, dtype=fp16, device='cuda')
@@ -509,19 +516,20 @@ class Pi05TorchFrontendThor:
         self._final_mod_b = g(f'{dp_full}.model.norm.dense.bias')
 
         # Decoder buffers (pre-allocate at max sizes)
+        Sg = self.Sa_gemm
         self._dec_rope = torch.empty(Sa, 256, dtype=fp16, device='cuda')
-        self._ae_x   = torch.empty(Sa, Da, dtype=fp16, device='cuda')
-        self._ae_xn  = torch.empty(Sa, Da, dtype=fp16, device='cuda')
-        self._ae_gate = torch.empty(Sa, Da, dtype=fp16, device='cuda')
-        self._ae_qkv = torch.empty(Sa, 2560, dtype=fp16, device='cuda')
-        self._ae_logits = torch.empty(Sa * 8, total_keys_max, dtype=fp16, device='cuda')
+        self._ae_x   = torch.empty(Sg, Da, dtype=fp16, device='cuda')
+        self._ae_xn  = torch.empty(Sg, Da, dtype=fp16, device='cuda')
+        self._ae_gate = torch.empty(Sg, Da, dtype=fp16, device='cuda')
+        self._ae_qkv = torch.empty(Sg, 2560, dtype=fp16, device='cuda')
+        self._ae_logits = torch.empty(Sa * 8, tk_logits, dtype=fp16, device='cuda')
         self._ae_attn = torch.empty(Sa * 8, 256, dtype=fp16, device='cuda')
-        self._ae_hid  = torch.empty(Sa, 2 * Ha, dtype=fp16, device='cuda')
-        self._ae_fg   = torch.empty(Sa, 2 * Ha, dtype=fp16, device='cuda')  # must fit Gate+Up GEMM output [Sa, 2H]
+        self._ae_hid  = torch.empty(Sg, 2 * Ha, dtype=fp16, device='cuda')
+        self._ae_fg   = torch.empty(Sg, 2 * Ha, dtype=fp16, device='cuda')  # must fit Gate+Up GEMM output [Sa, 2H]
         self._ae_action_f32 = torch.empty(Sa, 32, dtype=torch.float32, device='cuda')
-        self._ae_xn_fp8  = torch.zeros(Sa * Da, dtype=torch.uint8, device='cuda')
-        self._ae_hid_fp8 = torch.zeros(Sa * Ha, dtype=torch.uint8, device='cuda')
-        self._ae_ctx_fp8 = torch.zeros(Sa * 8 * 256, dtype=torch.uint8, device='cuda')
+        self._ae_xn_fp8  = torch.zeros(Sg * Da, dtype=torch.uint8, device='cuda')
+        self._ae_hid_fp8 = torch.zeros(Sg * Ha, dtype=torch.uint8, device='cuda')
+        self._ae_ctx_fp8 = torch.zeros(Sg * 8 * 256, dtype=torch.uint8, device='cuda')
         self._g_noise = torch.zeros(Sa, 32, dtype=fp16, device='cuda')
 
         # Calibration scale buffers
@@ -1226,7 +1234,21 @@ class Pi05TorchFrontendThor:
 
         # ---- Calibrate FP8 scales (using SigLIP warmup output in enc_x) ----
         if self.use_fp8:
-            self._calibrate(Se)
+            # Real-data / multi-frame scales are Se-independent.  Reloading
+            # the Se-keyed cache here would wipe a prior calibrate() and
+            # break accuracy when prompt length (hence Se) changes.
+            if (self._real_data_calibrated
+                    and getattr(self, '_enc_calib_scales', None) is not None
+                    and getattr(self, '_ae_calib_scales', None) is not None):
+                enc_ws = self._enc_w_dev.cpu().tolist()
+                self._enc_alpha_host = [
+                    float(np.float32(self._enc_calib_scales[i].item())
+                          * np.float32(enc_ws[i]))
+                    for i in range(self.Le * 4)]
+                logger.info(
+                    "Keeping real-data FP8 scales across Se=%d", Se)
+            else:
+                self._calibrate(Se)
         else:
             # FP16 path: no calibration needed; populate dummy scales /
             # alpha so the enc/ae forward dicts stay shape-compatible
@@ -1377,7 +1399,7 @@ class Pi05TorchFrontendThor:
             'w_scales':  self._ae_w_dev.data_ptr(),
         }
         ae_dims = {
-            'S': Sa, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
+            'S': Sa, 'S_gemm': self.Sa_gemm, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
             'steps': 10, 'layers': self.La, 'enc_seq': Se,
             'total_keys': total_keys,
             'fixed_shape': self._fixed_shape_active,
@@ -1605,7 +1627,7 @@ class Pi05TorchFrontendThor:
             'act_scales': self._ae_calib_scales.data_ptr(),
         }
         ae_dims = {
-            'S': Sa, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
+            'S': Sa, 'S_gemm': self.Sa_gemm, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
             'steps': 10, 'layers': La, 'enc_seq': Se,
             'total_keys': total_keys,
             'fixed_shape': self._fixed_shape_active,
@@ -1727,7 +1749,7 @@ class Pi05TorchFrontendThor:
             'act_scales': self._ae_calib_scales.data_ptr(),
         }
         ae_dims = {
-            'S': Sa, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
+            'S': Sa, 'S_gemm': self.Sa_gemm, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
             'steps': 10, 'layers': La, 'enc_seq': Se,
             'total_keys': total_keys,
             'fixed_shape': self._fixed_shape_active,
@@ -1902,7 +1924,7 @@ class Pi05TorchFrontendThor:
             'act_scales': self._ae_calib_scales.data_ptr(),
         }
         ae_dims = {
-            'S': Sa, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
+            'S': Sa, 'S_gemm': self.Sa_gemm, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
             'steps': 10, 'layers': La, 'enc_seq': Se,
             'total_keys': total_keys,
             'fixed_shape': self._fixed_shape_active,
@@ -2082,7 +2104,7 @@ class Pi05TorchFrontendThor:
             'act_scales': self._ae_calib_scales.data_ptr(),
         }
         ae_dims_b2 = {
-            'S': Sa, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
+            'S': Sa, 'S_gemm': self.Sa_gemm, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
             'steps': 10, 'layers': La, 'enc_seq': Se,
             'total_keys': total_keys,
         }
@@ -2231,7 +2253,7 @@ class Pi05TorchFrontendThor:
             'act_scales': self._ae_calib_scales.data_ptr(),
         }
         ae_dims_b2 = {
-            'S': Sa, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
+            'S': Sa, 'S_gemm': self.Sa_gemm, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
             'steps': 10, 'layers': La, 'enc_seq': Se,
             'total_keys': total_keys,
         }
@@ -2806,7 +2828,7 @@ class Pi05TorchFrontendThor:
             'w_scales':   self._ae_w_dev.data_ptr(),
         }
         ae_dims = {
-            'S': Sa, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
+            'S': Sa, 'S_gemm': self.Sa_gemm, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
             'steps': 10, 'layers': self.La, 'enc_seq': Se,
             'total_keys': total_keys,
             'fixed_shape': self._fixed_shape_active,
@@ -2924,7 +2946,7 @@ class Pi05TorchFrontendThor:
             'w_scales':   self._ae_w_dev.data_ptr(),
         }
         ae_dims = {
-            'S': Sa, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
+            'S': Sa, 'S_gemm': self.Sa_gemm, 'D': Da, 'H': Ha, 'NH': 8, 'HD': 256,
             'steps': 10, 'layers': La, 'enc_seq': Se,
             'total_keys': total_keys,
             'fixed_shape': self._fixed_shape_active,

@@ -527,7 +527,7 @@ modalities::Status Sm110OperationDriver::vision_fmha_fp16(
 modalities::Status Sm110OperationDriver::patch_im2col_fp16(
     const void* images, void* patches, int num_views,
     std::uintptr_t stream) const {
-    if (!images || !patches || num_views <= 0 || num_views > 3) {
+    if (!images || !patches || num_views <= 0 || num_views > 5) {
         return invalid("SM110 patch im2col arguments are invalid");
     }
     ::patch_im2col(static_cast<const __half*>(images),

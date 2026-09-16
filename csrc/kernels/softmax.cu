@@ -7,8 +7,9 @@
 #include "softmax.cuh"
 
 #define SM_WARP_SIZE 32
-#define SM_MAX_COLS 1024
-#define SM_ITERS (SM_MAX_COLS / SM_WARP_SIZE)  // 32
+// 5-view Pi0.5 Se≈1404 / total_keys≈1552; legacy 1024 only covered ≤3 views.
+#define SM_MAX_COLS 2048
+#define SM_ITERS (SM_MAX_COLS / SM_WARP_SIZE)  // 64
 
 __global__ void softmax_fp16_kernel(__half* data, int rows, int cols) {
     int lane = threadIdx.x % SM_WARP_SIZE;

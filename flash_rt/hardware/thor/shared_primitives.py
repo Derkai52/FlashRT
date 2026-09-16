@@ -96,7 +96,10 @@ def siglip_forward(gemm, fvk, bufs, weights, dims, stream=0, *, attn=None,
 
     alpha = weights['alpha']  # host float array, len = L*4
 
+    _lt = dims.get("layer_timer")
     for l in range(L):
+        if _lt is not None:
+            _lt.begin(f"vision.block{l}")
         a_qkv = alpha[l * 4 + 0]
         a_o = alpha[l * 4 + 1]
         a_up = alpha[l * 4 + 2]
@@ -153,6 +156,8 @@ def siglip_forward(gemm, fvk, bufs, weights, dims, stream=0, *, attn=None,
         # x[S,D] += alpha * hid_fp8[S,H] @ down_w[H,D] + down_b[D]
         gemm.fp8_nn_bias_res(hid_fp8, weights['down_w'][l], x, weights['down_b'][l],
                              S, D, H, a_down, stream)
+        if _lt is not None:
+            _lt.end(f"vision.block{l}")
 
     # x[S, D] now contains final SigLIP output
 
@@ -473,7 +478,10 @@ def encoder_forward(gemm, fvk, bufs, weights, dims, stream=0, *, attn=None,
     act_scales = weights['act_scales']  # device float ptr (base of calib tensor)
     alpha_host = weights['alpha_host']  # host float list [L*4]
 
+    _lt = dims.get("layer_timer")
     for l in range(L):
+        if _lt is not None:
+            _lt.begin(f"paligemma.block{l}")
         last = (l == L - 1)
 
         # Per-layer act_scale device pointers (float32 = 4 bytes each)
@@ -532,6 +540,8 @@ def encoder_forward(gemm, fvk, bufs, weights, dims, stream=0, *, attn=None,
             # ── 11. Residual writeback. The next layer recomputes C1
             # RMSNorm→FP8, so no FP8 output is consumed here.
             fvk.residual_add_fp16(x, fg, Se * D, stream)
+        if _lt is not None:
+            _lt.end(f"paligemma.block{l}")
 
     # x[Se, D] now contains final encoder output
 

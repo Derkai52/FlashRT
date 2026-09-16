@@ -172,8 +172,10 @@ bool sane_quantile_pair(const std::vector<double>& q01,
                         const std::vector<double>& q99) {
     if (q01.empty() || q01.size() != q99.size()) return false;
     for (size_t i = 0; i < q01.size(); ++i) {
+        // Equal quantiles are valid (OpenPI epsilon unnormalize); only
+        // inverted spans are rejected.
         if (!std::isfinite(q01[i]) || !std::isfinite(q99[i]) ||
-            q99[i] <= q01[i]) {
+            q99[i] < q01[i]) {
             return false;
         }
     }
@@ -185,7 +187,7 @@ bool sane_quantile_pair(const std::vector<float>& q01,
     if (q01.empty() || q01.size() != q99.size()) return false;
     for (size_t i = 0; i < q01.size(); ++i) {
         if (!std::isfinite(q01[i]) || !std::isfinite(q99[i]) ||
-            q99[i] <= q01[i]) {
+            q99[i] < q01[i]) {
             return false;
         }
     }
@@ -231,6 +233,11 @@ bool validate_norm_stats_file(const std::string& path,
                               flashrt::models::pi05::NativeOpenConfig* config) {
     std::string json;
     if (!read_text_file(path, &json)) return false;
+    // OpenPI checkpoints often wrap blocks under {"norm_stats": {...}}.
+    std::string wrapped;
+    if (object_for_key(json, "norm_stats", &wrapped)) {
+        json = std::move(wrapped);
+    }
     std::vector<float> action_q01;
     std::vector<float> action_q99;
     std::vector<float> state_q01;
@@ -511,8 +518,8 @@ int validate_config(
         g_last_error = "state_dim must be in [1, INT_MAX]";
         return -1;
     }
-    if (num_views < 1 || num_views > 3) {
-        g_last_error = "num_views must be in [1, 3]";
+    if (num_views < 1 || num_views > 5 || num_views == 4) {
+        g_last_error = "num_views must be 1, 2, 3, or 5";
         return -1;
     }
     if (chunk <= 0 || chunk > INT_MAX) {

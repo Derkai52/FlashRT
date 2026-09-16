@@ -462,7 +462,10 @@ class ThorFlashAttnBackend(AttentionBackendBase):
                     float(s["scale"]), stream,
                 )
             else:
-                fvk.attention_qkv_fp16(
+                attn_fn = (
+                    fvk.attention_qkv_fp16_padded
+                    if (int(kv_seq) & 1) else fvk.attention_qkv_fp16)
+                attn_fn(
                     self._ctx_cpp,
                     int(s["Q_O"]), K_ptr, V_ptr,
                     int(s["logits"]), int(s["Q_O"]),

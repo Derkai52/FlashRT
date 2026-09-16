@@ -8,10 +8,18 @@ namespace pi05 {
 
 modalities::VisionPreprocessSpec vision_preprocess_spec(int num_views) {
     modalities::VisionPreprocessSpec spec;
-    static const char* kViews[] = {"image", "wrist_image", "wrist_image_right"};
-    num_views = std::max(1, std::min(3, num_views));
+    // 1–3: OpenPI/LIBERO names. 5: Sculptor sculptor_0911 camera keys.
+    // 4 is rejected by resolve_pi05_shape / native open.
+    static const char* kViews3[] = {"image", "wrist_image", "wrist_image_right"};
+    static const char* kViews5[] = {
+        "base_0_rgb", "base_1_rgb", "base_2_rgb", "left_wrist_0_rgb",
+        "right_wrist_0_rgb"};
+    if (num_views < 1) num_views = 1;
+    if (num_views > 5) num_views = 5;
+    if (num_views == 4) num_views = 3;
+    const char* const* views = (num_views == 5) ? kViews5 : kViews3;
     spec.view_order.reserve(static_cast<std::size_t>(num_views));
-    for (int i = 0; i < num_views; ++i) spec.view_order.emplace_back(kViews[i]);
+    for (int i = 0; i < num_views; ++i) spec.view_order.emplace_back(views[i]);
     spec.target_width = kImageSize;
     spec.target_height = kImageSize;
     spec.output_dtype = modalities::DType::kBFloat16;

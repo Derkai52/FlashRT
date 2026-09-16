@@ -290,11 +290,12 @@ bool valid_native_calibration_config(const NativeCalibrationConfig& config) {
          valid_quantiles && i < config.state_q01.size(); ++i) {
         valid_quantiles = std::isfinite(config.state_q01[i]) &&
                           std::isfinite(config.state_q99[i]) &&
-                          config.state_q99[i] > config.state_q01[i];
+                          config.state_q99[i] >= config.state_q01[i];
     }
     return !config.checkpoint_path.empty() &&
            !config.tokenizer_model_path.empty() && config.state_dim > 0 &&
-           config.num_views >= 1 && config.num_views <= 3 &&
+           config.num_views >= 1 && config.num_views <= 5 &&
+           config.num_views != 4 &&
            config.max_prompt_tokens >= 1 && config.chunk_size > 0 &&
            config.num_steps > 0 &&
            (config.vision_pool_factor == 1 ||
@@ -379,7 +380,8 @@ modalities::Status validate_native_calibration_artifact(
          artifact.activation_dtype != kBfloat16) ||
         artifact.hardware.empty() || !valid_digest(artifact.weights_sha256) ||
         !valid_digest(artifact.tokenizer_sha256) || artifact.num_views < 1 ||
-        artifact.num_views > 3 || artifact.max_prompt_tokens < 1 ||
+        artifact.num_views > 5 || artifact.num_views == 4 ||
+        artifact.max_prompt_tokens < 1 ||
         artifact.state_dim < 1 || artifact.chunk_size < 1 ||
         artifact.num_steps < 1 ||
         (artifact.vision_pool_factor != 1 &&

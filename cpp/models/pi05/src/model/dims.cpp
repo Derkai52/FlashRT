@@ -19,7 +19,8 @@ modalities::Status resolve_pi05_shape(const Pi05ShapeConfig& config,
     if (!out) return invalid("Pi0.5 resolved shape destination is null");
 
     const std::int64_t int_max = std::numeric_limits<int>::max();
-    if (config.num_views < 1 || config.num_views > 3 ||
+    if (config.num_views < 1 || config.num_views > 5 ||
+        config.num_views == 4 ||
         config.max_prompt_tokens < 1 ||
         config.max_prompt_tokens > int_max || config.chunk < 1 ||
         config.chunk > int_max || config.num_steps < 1 ||
