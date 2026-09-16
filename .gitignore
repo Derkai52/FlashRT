@@ -9,6 +9,7 @@ dist/
 # Build artifacts
 build/
 build*/
+install-sm110/
 *.so
 *.o
 *.a
